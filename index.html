@@ -82,16 +82,22 @@
 <script>
 /**
  * CONFIG
- * CSV local file beside this HTML: Time_sheet.csv
+ * Google Sheets published CSV URL.
  * - column A: time (e.g., 13:22 or 1:22 PM)
  * - column C: name/description
+ * Event date is stored in cell C21.
  */
- const CSV_URL_BASE = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTbnxuPH_HDH9RdFUQmau6T_fX-FjygDnR-TNe6YJt5lf8vuG7Ls8TfopG4pTQOEL5b9V0QwKD3kdjM/pub?gid=134751126&single=true&output=csv";
- const CSV_URL = `${CSV_URL_BASE}${CSV_URL_BASE.includes("?") ? "&" : "?"}t=${Date.now()}`;
+const CSV_URL_BASE = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTbnxuPH_HDH9RdFUQmau6T_fX-FjygDnR-TNe6YJt5lf8vuG7Ls8TfopG4pTQOEL5b9V0QwKD3kdjM/pub?gid=134751126&single=true&output=csv";
+
+// Cache-busting per fetch (important: Date.now() must be evaluated each time)
+function csvUrl(){
+  return `${CSV_URL_BASE}${CSV_URL_BASE.includes("?") ? "&" : "?"}t=${Date.now()}`;
+}
+
 const COL_TIME = 0;
 const COL_NAME = 2;
 
-
+// Date is stored in cell C21 in the CSV (1-based). Convert to 0-based indices:
 const DATE_CELL_ROW = 21 - 1; // 20
 const DATE_CELL_COL = 3 - 1;  // 2  (C)
 
@@ -119,6 +125,34 @@ function formatCountdown(deltaSec){
   const mm = Math.floor((deltaSec % 3600) / 60);
   const ss = deltaSec % 60;
   return hh > 0 ? `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}` : `${pad2(mm)}:${pad2(ss)}`;
+}
+
+function dateKeyLocal(d){
+  // local date as YYYY-MM-DD
+  return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+}
+
+function parseDateToKey(s){
+  if (s === undefined || s === null) return null;
+  const raw = String(s).trim();
+  if (!raw) return null;
+
+  // ISO: YYYY-MM-DD (recommended)
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+
+  // AU-style: DD/MM/YYYY
+  const dmy = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (dmy){
+    const dd = Number(dmy[1]), mm = Number(dmy[2]), yy = Number(dmy[3]);
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) return `${yy}-${pad2(mm)}-${pad2(dd)}`;
+  }
+
+  // Sometimes Sheets exports a full datetime; try extracting YYYY-MM-DD
+  const isoInText = raw.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (isoInText) return `${isoInText[1]}-${isoInText[2]}-${isoInText[3]}`;
+
+  return null;
 }
 
 function parseTimeToMinutes(s){
@@ -190,11 +224,13 @@ function parseCSV(text){
 
 async function loadSchedule(){
   try{
-    const res = await fetch(CSV_URL, { cache: "no-store" });
-    if (!res.ok) throw new Error(`CSV fetch failed: ${res.status} ${res.statusText} (url: ${CSV_URL})`);
+    const url = csvUrl();
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`CSV fetch failed: ${res.status} ${res.statusText} (url: ${url})`);
 
     const txt = await res.text();
     const rows = parseCSV(txt);
+
     // Read event date from cell C21
     eventDateKey = parseDateToKey(rows?.[DATE_CELL_ROW]?.[DATE_CELL_COL]);
     if (!eventDateKey) {
@@ -214,7 +250,9 @@ async function loadSchedule(){
     parsed.sort((a,b)=>a.minutesOfDay - b.minutesOfDay);
     schedule = parsed;
     lastFetchMs = Date.now();
-    document.getElementById("msg").textContent = "";
+
+    // Clear message only if date parsed (otherwise keep the warning)
+    if (eventDateKey) document.getElementById("msg").textContent = "";
   } catch (e){
     document.getElementById("msg").textContent = String(e);
   }
@@ -226,7 +264,7 @@ function isRace(ev){
   return (ev.name || "").toLowerCase().includes("race");
 }
 
-// Generic: next matching event (wraps to tomorrow)
+// Generic: next matching event (NO wrap to tomorrow)
 function secondsUntilNextMatching(now, predicate){
   if (!schedule.length) return null;
 
@@ -235,7 +273,7 @@ function secondsUntilNextMatching(now, predicate){
 
   const nowMin = now.getHours()*60 + now.getMinutes() + now.getSeconds()/60;
 
-  // NO WRAP: only consider future events today
+  // Only consider future events today
   const next = items.find(ev => ev.minutesOfDay > nowMin);
   if (!next) return null;
 
@@ -272,34 +310,6 @@ function findActive(now){
   return active;
 }
 
-function dateKeyLocal(d){
-  // local date as YYYY-MM-DD
-  return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
-}
-
-function parseDateToKey(s){
-  if (s === undefined || s === null) return null;
-  const raw = String(s).trim();
-  if (!raw) return null;
-
-  // ISO: YYYY-MM-DD (recommended)
-  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
-
-  // AU-style: DD/MM/YYYY
-  const dmy = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (dmy){
-    const dd = Number(dmy[1]), mm = Number(dmy[2]), yy = Number(dmy[3]);
-    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) return `${yy}-${pad2(mm)}-${pad2(dd)}`;
-  }
-
-  // Sometimes Sheets exports a full datetime; try extracting YYYY-MM-DD
-  const isoInText = raw.match(/(\d{4})-(\d{2})-(\d{2})/);
-  if (isoInText) return `${isoInText[1]}-${isoInText[2]}-${isoInText[3]}`;
-
-  return null;
-}
-
 function render(){
   const now = new Date();
   document.getElementById("now").textContent = formatHMS(now);
@@ -321,11 +331,10 @@ function render(){
     document.getElementById("upNextTasks").innerHTML = "<div>SAILING WINDOW CLOSED</div>";
     document.getElementById("upNextRaces").innerHTML = "<div>SAILING WINDOW CLOSED</div>";
 
-    // Optional: show which day it applies to
     if (eventDateKey){
       document.getElementById("msg").textContent = `Event date: ${eventDateKey}`;
     }
-    return; // IMPORTANT: stop further rendering/countdown logic
+    return;
   }
 
   // NEXT TASK (any row)
@@ -339,7 +348,7 @@ function render(){
     document.getElementById("taskCountdown").textContent = formatCountdown(deltaSec);
   } else {
     document.getElementById("nextTaskTime").textContent = "--:--";
-    document.getElementById("nextTaskName").textContent = "No schedule loaded";
+    document.getElementById("nextTaskName").textContent = "No upcoming tasks";
     document.getElementById("taskCountdownTitle").textContent = "";
     document.getElementById("taskCountdown").textContent = "--:--";
   }
@@ -353,44 +362,39 @@ function render(){
     document.getElementById("raceCountdown").textContent = formatCountdown(deltaSec);
     document.getElementById("raceMeta").textContent = `Race time: ${formatHMfromMinutes(next.minutesOfDay)}`;
   } else {
-    document.getElementById("raceCountdownTitle").textContent = schedule.length ? "No race rows found" : "";
+    document.getElementById("raceCountdownTitle").textContent = schedule.length ? "No upcoming races" : "";
     document.getElementById("raceCountdown").textContent = "--:--";
-    document.getElementById("raceMeta").textContent = schedule.length ? "Add 'race' to the race rows in column C." : "";
+    document.getElementById("raceMeta").textContent = schedule.length ? "Add 'race' to race rows in column C." : "";
   }
 
   // Active (most recent row)
   const active = findActive(now);
   document.getElementById("active").textContent = active?.name ? `NOW: ${active.name}` : "";
 
-  // Up next (tasks) - next 3
+  // Up next (tasks) - next 3 (no wrap to tomorrow)
   if (schedule.length){
     const nowMin = now.getHours()*60 + now.getMinutes() + now.getSeconds()/60;
+
     const upcomingTasks = schedule
-      .map(ev => {
-        let dm = ev.minutesOfDay - nowMin;
-        if (dm <= 0) dm += 24*60;
-        return { ev, dm };
-      })
+      .map(ev => ({ ev, dm: ev.minutesOfDay - nowMin }))
+      .filter(x => x.dm > 0)
       .sort((a,b)=>a.dm - b.dm)
       .slice(0,3)
       .map(x => `${formatHMfromMinutes(x.ev.minutesOfDay)} — ${x.ev.name || "(no label)"}`);
 
     document.getElementById("upNextTasks").innerHTML =
-      upcomingTasks.map(line => `<div>${line}</div>`).join("");
+      upcomingTasks.length ? upcomingTasks.map(line => `<div>${line}</div>`).join("") : "<div>No upcoming tasks</div>";
 
-    const racesOnly = schedule.filter(isRace);
-    const upcomingRaces = racesOnly
-      .map(ev => {
-        let dm = ev.minutesOfDay - nowMin;
-        if (dm <= 0) dm += 24*60;
-        return { ev, dm };
-      })
+    const upcomingRaces = schedule
+      .filter(isRace)
+      .map(ev => ({ ev, dm: ev.minutesOfDay - nowMin }))
+      .filter(x => x.dm > 0)
       .sort((a,b)=>a.dm - b.dm)
       .slice(0,3)
       .map(x => `${formatHMfromMinutes(x.ev.minutesOfDay)} — ${x.ev.name || "(no label)"}`);
 
     document.getElementById("upNextRaces").innerHTML =
-      upcomingRaces.length ? upcomingRaces.map(line => `<div>${line}</div>`).join("") : "<div>No races found</div>";
+      upcomingRaces.length ? upcomingRaces.map(line => `<div>${line}</div>`).join("") : "<div>No upcoming races</div>";
   } else {
     document.getElementById("upNextTasks").textContent = "";
     document.getElementById("upNextRaces").textContent = "";
@@ -406,8 +410,8 @@ async function tick(){
 }
 
 (async function init(){
-  if (!CSV_URL){
-    document.getElementById("msg").textContent = "CSV_URL is empty.";
+  if (!CSV_URL_BASE){
+    document.getElementById("msg").textContent = "CSV_URL_BASE is empty.";
   } else {
     await loadSchedule();
   }
