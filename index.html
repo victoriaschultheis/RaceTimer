@@ -91,11 +91,16 @@
 const COL_TIME = 0;
 const COL_NAME = 2;
 
+
+const DATE_CELL_ROW = 21 - 1; // 20
+const DATE_CELL_COL = 3 - 1;  // 2  (C)
+
 // Refresh schedule from CSV every N seconds (UI updates every second regardless)
-const SCHEDULE_REFRESH_SECONDS = 30;
+const SCHEDULE_REFRESH_SECONDS = 10;
 
 let schedule = []; // { minutesOfDay, timeStr, name }
 let lastFetchMs = 0;
+let eventDateKey = null; // YYYY-MM-DD from C21
 
 function pad2(n){ return String(n).padStart(2,"0"); }
 
@@ -190,6 +195,12 @@ async function loadSchedule(){
 
     const txt = await res.text();
     const rows = parseCSV(txt);
+    // Read event date from cell C21
+    eventDateKey = parseDateToKey(rows?.[DATE_CELL_ROW]?.[DATE_CELL_COL]);
+    if (!eventDateKey) {
+      document.getElementById("msg").textContent =
+        "Could not parse event date from C21. Use YYYY-MM-DD (recommended) or DD/MM/YYYY.";
+    }
 
     const parsed = [];
     for (let r=0; r<rows.length; r++){
@@ -224,14 +235,27 @@ function secondsUntilNextMatching(now, predicate){
 
   const nowMin = now.getHours()*60 + now.getMinutes() + now.getSeconds()/60;
 
-  let next = items.find(ev => ev.minutesOfDay > nowMin);
-  if (!next) next = items[0];
+  // NO WRAP: only consider future events today
+  const next = items.find(ev => ev.minutesOfDay > nowMin);
+  if (!next) return null;
 
-  let deltaMin = next.minutesOfDay - nowMin;
-  if (deltaMin < 0) deltaMin += 24*60;
-
+  const deltaMin = next.minutesOfDay - nowMin;
   const deltaSec = Math.max(0, Math.floor(deltaMin * 60));
   return { next, deltaSec };
+}
+
+function isSailingWindowClosed(now){
+  // If event date is known and today is not the event date, treat as closed
+  if (eventDateKey){
+    const todayKey = dateKeyLocal(now);
+    if (todayKey !== eventDateKey) return true;
+  }
+
+  if (!schedule.length) return false; // schedule not loaded yet -> don't show closed
+
+  const nowMin = now.getHours()*60 + now.getMinutes() + now.getSeconds()/60;
+  const lastMin = schedule[schedule.length - 1].minutesOfDay;
+  return nowMin > lastMin; // past the final task time
 }
 
 function findActive(now){
@@ -248,10 +272,61 @@ function findActive(now){
   return active;
 }
 
+function dateKeyLocal(d){
+  // local date as YYYY-MM-DD
+  return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+}
+
+function parseDateToKey(s){
+  if (s === undefined || s === null) return null;
+  const raw = String(s).trim();
+  if (!raw) return null;
+
+  // ISO: YYYY-MM-DD (recommended)
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+
+  // AU-style: DD/MM/YYYY
+  const dmy = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (dmy){
+    const dd = Number(dmy[1]), mm = Number(dmy[2]), yy = Number(dmy[3]);
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) return `${yy}-${pad2(mm)}-${pad2(dd)}`;
+  }
+
+  // Sometimes Sheets exports a full datetime; try extracting YYYY-MM-DD
+  const isoInText = raw.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (isoInText) return `${isoInText[1]}-${isoInText[2]}-${isoInText[3]}`;
+
+  return null;
+}
+
 function render(){
   const now = new Date();
   document.getElementById("now").textContent = formatHMS(now);
   document.getElementById("tz").textContent = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+
+  const closed = isSailingWindowClosed(now);
+  if (closed){
+    document.getElementById("nextTaskTime").textContent = "--:--";
+    document.getElementById("nextTaskName").textContent = "SAILING WINDOW CLOSED";
+
+    document.getElementById("taskCountdownTitle").textContent = "";
+    document.getElementById("taskCountdown").textContent = "--:--";
+    document.getElementById("active").textContent = "";
+
+    document.getElementById("raceCountdownTitle").textContent = "";
+    document.getElementById("raceCountdown").textContent = "--:--";
+    document.getElementById("raceMeta").textContent = "";
+
+    document.getElementById("upNextTasks").innerHTML = "<div>SAILING WINDOW CLOSED</div>";
+    document.getElementById("upNextRaces").innerHTML = "<div>SAILING WINDOW CLOSED</div>";
+
+    // Optional: show which day it applies to
+    if (eventDateKey){
+      document.getElementById("msg").textContent = `Event date: ${eventDateKey}`;
+    }
+    return; // IMPORTANT: stop further rendering/countdown logic
+  }
 
   // NEXT TASK (any row)
   const nextTaskInfo = secondsUntilNextMatching(now, null);
